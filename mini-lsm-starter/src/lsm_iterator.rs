@@ -1,5 +1,4 @@
 use anyhow::{Error, Result};
-use bytes::Bytes;
 
 use crate::{
     iterators::{merge_iterator::MergeIterator, StorageIterator},
