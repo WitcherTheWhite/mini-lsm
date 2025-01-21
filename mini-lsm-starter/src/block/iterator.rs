@@ -63,8 +63,11 @@ impl BlockIterator {
 
     /// Seeks to the first key in the block.
     pub fn seek_to_first(&mut self) {
-        self.idx = 0;
+        if self.block.data.is_empty() {
+            return;
+        }
 
+        self.idx = 0;
         let entry_start = 0;
         let key_size = (&self.block.data[entry_start..entry_start + 2]).get_u16() as usize;
         let key_start = entry_start + 2;

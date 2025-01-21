@@ -39,7 +39,7 @@ impl BlockBuilder {
             self.first_key.set_from_slice(key);
             self.offsets.push(0);
             self.data.put_u16(key.len() as u16);
-            self.data.extend_from_slice(&key.raw_ref());
+            self.data.extend_from_slice(key.raw_ref());
             self.data.put_u16(value.len() as u16);
             self.data.extend_from_slice(value);
             return true;
@@ -53,7 +53,7 @@ impl BlockBuilder {
 
         self.offsets.push(self.data.len() as u16);
         self.data.put_u16(key.len() as u16);
-        self.data.extend_from_slice(&key.raw_ref());
+        self.data.extend_from_slice(key.raw_ref());
         self.data.put_u16(value.len() as u16);
         self.data.extend_from_slice(value);
 

@@ -49,7 +49,7 @@ impl<I: StorageIterator> MergeIterator<I> {
                 heap.push(HeapWrapper(i, iter));
             }
         }
-        if heap.len() == 0 {
+        if heap.is_empty() {
             return Self {
                 iters: heap,
                 current: None,
