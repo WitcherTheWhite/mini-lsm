@@ -188,7 +188,6 @@ impl SsTable {
         } else {
             self.block_meta[block_idx + 1].offset
         };
-        println!("{} {}", block_start, block_end);
         let block_data = self
             .file
             .read(block_start as u64, block_end as u64 - block_start as u64)?;

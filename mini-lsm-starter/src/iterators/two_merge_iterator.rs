@@ -1,6 +1,4 @@
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
+#![allow(clippy::comparison_chain)]
 use anyhow::Result;
 
 use super::StorageIterator;
@@ -10,7 +8,7 @@ use super::StorageIterator;
 pub struct TwoMergeIterator<A: StorageIterator, B: StorageIterator> {
     a: A,
     b: B,
-    // Add fields as need
+    flag: bool,
 }
 
 impl<
@@ -19,7 +17,22 @@ impl<
     > TwoMergeIterator<A, B>
 {
     pub fn create(a: A, b: B) -> Result<Self> {
-        unimplemented!()
+        let mut iter = Self { a, b, flag: true };
+        if !iter.a.is_valid() {
+            iter.flag = false;
+            return Ok(iter);
+        };
+        if !iter.b.is_valid() {
+            return Ok(iter);
+        };
+
+        if iter.a.key() == iter.b.key() {
+            iter.b.next()?;
+        } else if iter.a.key() > iter.b.key() {
+            iter.flag = false;
+        };
+
+        Ok(iter)
     }
 }
 
@@ -31,18 +44,50 @@ impl<
     type KeyType<'a> = A::KeyType<'a>;
 
     fn key(&self) -> Self::KeyType<'_> {
-        unimplemented!()
+        if self.flag {
+            self.a.key()
+        } else {
+            self.b.key()
+        }
     }
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        if self.flag {
+            self.a.value()
+        } else {
+            self.b.value()
+        }
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        self.a.is_valid() || self.b.is_valid()
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        if self.flag {
+            self.a.next()?;
+        } else {
+            self.b.next()?;
+        }
+
+        if !self.a.is_valid() {
+            self.flag = false;
+            return Ok(());
+        };
+        if !self.b.is_valid() {
+            self.flag = true;
+            return Ok(());
+        };
+
+        if self.a.key() < self.b.key() {
+            self.flag = true;
+        } else if self.a.key() == self.b.key() {
+            self.flag = true;
+            self.b.next()?;
+        } else {
+            self.flag = false;
+        };
+
+        Ok(())
     }
 }

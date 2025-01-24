@@ -88,8 +88,10 @@ impl StorageIterator for SsTableIterator {
         self.blk_iter.next();
         if !self.blk_iter.is_valid() {
             self.blk_idx += 1;
-            let block = self.table.read_block(self.blk_idx)?;
-            self.blk_iter = BlockIterator::create_and_seek_to_first(block);
+            if self.blk_idx < self.table.num_of_blocks() {
+                let block = self.table.read_block_cached(self.blk_idx)?;
+                self.blk_iter = BlockIterator::create_and_seek_to_first(block);
+            }
         }
 
         Ok(())

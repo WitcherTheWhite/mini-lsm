@@ -1,20 +1,28 @@
+use std::ops::Bound;
+
 use anyhow::{Error, Result};
+use bytes::Bytes;
 
 use crate::{
-    iterators::{merge_iterator::MergeIterator, StorageIterator},
+    iterators::{
+        merge_iterator::MergeIterator, two_merge_iterator::TwoMergeIterator, StorageIterator,
+    },
     mem_table::MemTableIterator,
+    table::SsTableIterator,
 };
 
 /// Represents the internal type for an LSM iterator. This type will be changed across the tutorial for multiple times.
-type LsmIteratorInner = MergeIterator<MemTableIterator>;
+type LsmIteratorInner =
+    TwoMergeIterator<MergeIterator<MemTableIterator>, MergeIterator<SsTableIterator>>;
 
 pub struct LsmIterator {
     inner: LsmIteratorInner,
+    upper: Bound<Bytes>,
 }
 
 impl LsmIterator {
-    pub(crate) fn new(iter: LsmIteratorInner) -> Result<Self> {
-        let mut iter = Self { inner: iter };
+    pub(crate) fn new(iter: LsmIteratorInner, upper: Bound<Bytes>) -> Result<Self> {
+        let mut iter: LsmIterator = Self { inner: iter, upper };
         while iter.is_valid() && iter.value().is_empty() {
             iter.inner.next()?;
         }
@@ -39,8 +47,22 @@ impl StorageIterator for LsmIterator {
     }
 
     fn next(&mut self) -> Result<()> {
+        match &self.upper {
+            Bound::Included(key) => {
+                if self.key() > key {
+                    return Ok(());
+                }
+            }
+            Bound::Excluded(key) => {
+                if self.key() >= key {
+                    return Ok(());
+                }
+            }
+            Bound::Unbounded => {}
+        }
+
         self.inner.next()?;
-        if self.is_valid() && self.value().is_empty() {
+        while self.is_valid() && self.value().is_empty() {
             self.inner.next()?;
         }
 

@@ -1,6 +1,3 @@
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -88,7 +85,7 @@ impl SsTableBuilder {
         data.put_u32(meta_offset);
 
         let file = FileObject::create(path.as_ref(), data)?;
-        SsTable::open(0, None, file)
+        SsTable::open(id, None, file)
     }
 
     #[cfg(test)]
