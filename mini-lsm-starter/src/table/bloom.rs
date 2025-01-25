@@ -3,6 +3,8 @@
 use anyhow::Result;
 use bytes::{BufMut, Bytes, BytesMut};
 
+pub const FALSE_POSITIVE_RATE: f64 = 0.01;
+
 /// Implements a bloom filter
 pub struct Bloom {
     /// data of filter in bits
@@ -64,7 +66,7 @@ impl Bloom {
     /// Get bloom filter bits per key from entries count and FPR
     pub fn bloom_bits_per_key(entries: usize, false_positive_rate: f64) -> usize {
         let size =
-            -1.0 * (entries as f64) * false_positive_rate.ln() / std::f64::consts::LN_2.powi(2);
+            -1.0 * (entries as f64) * FALSE_POSITIVE_RATE.ln() / std::f64::consts::LN_2.powi(2);
         let locs = (size / (entries as f64)).ceil();
         locs as usize
     }
@@ -79,7 +81,15 @@ impl Bloom {
         let mut filter = BytesMut::with_capacity(nbytes);
         filter.resize(nbytes, 0);
 
-        // TODO: build the bloom filter
+        for h in keys {
+            let mut h = *h;
+            let delta = h.rotate_left(15); // h is the key hash
+            for _ in 0..k {
+                let bit_pos = (h as usize) % nbits;
+                filter.set_bit(bit_pos, true);
+                h = h.wrapping_add(delta);
+            }
+        }
 
         Self {
             filter: filter.freeze(),
@@ -96,7 +106,15 @@ impl Bloom {
             let nbits = self.filter.bit_len();
             let delta = h.rotate_left(15);
 
-            // TODO: probe the bloom filter
+            let mut h = h;
+            let delta = h.rotate_left(15); // h is the key hash
+            for _ in 0..self.k {
+                let bit_pos = (h as usize) % nbits;
+                if !self.filter.get_bit(bit_pos) {
+                    return false;
+                };
+                h = h.wrapping_add(delta);
+            }
 
             true
         }

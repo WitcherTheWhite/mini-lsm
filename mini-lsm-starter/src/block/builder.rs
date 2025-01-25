@@ -4,7 +4,8 @@ use crate::key::{KeySlice, KeyVec};
 
 use super::Block;
 
-pub(crate) const KEY_LEN_SIZE: usize = 2;
+pub(crate) const KEY_PREFIX_LEN_SIZE: usize = 2;
+pub(crate) const REST_KEY_LEN_SIZE: usize = 2;
 pub(crate) const VALUE_LEN_SIZE: usize = 2;
 pub(crate) const OFFSET_SIZE: usize = 2;
 pub(crate) const EXTRA_SIZE: usize = 2;
@@ -38,24 +39,35 @@ impl BlockBuilder {
         if self.data.is_empty() {
             self.first_key.set_from_slice(key);
             self.offsets.push(0);
+            self.data.put_u16(0);
             self.data.put_u16(key.len() as u16);
-            self.data.extend_from_slice(key.raw_ref());
+            self.data.put_slice(key.raw_ref());
             self.data.put_u16(value.len() as u16);
-            self.data.extend_from_slice(value);
+            self.data.put_slice(value);
             return true;
         }
 
         let current_size = self.data.len() + 2 * self.offsets.len() + EXTRA_SIZE;
-        let add_size = KEY_LEN_SIZE + key.len() + VALUE_LEN_SIZE + value.len() + OFFSET_SIZE;
+        let key = key.raw_ref();
+        let prefix_len = longest_common_prefix_len(self.first_key.raw_ref(), key);
+        let rest_key_len = key.len() - prefix_len;
+
+        let add_size = KEY_PREFIX_LEN_SIZE
+            + REST_KEY_LEN_SIZE
+            + rest_key_len
+            + VALUE_LEN_SIZE
+            + value.len()
+            + OFFSET_SIZE;
         if current_size + add_size > self.block_size {
             return false;
         }
 
         self.offsets.push(self.data.len() as u16);
-        self.data.put_u16(key.len() as u16);
-        self.data.extend_from_slice(key.raw_ref());
+        self.data.put_u16(prefix_len as u16);
+        self.data.put_u16(rest_key_len as u16);
+        self.data.put_slice(&key[prefix_len..]);
         self.data.put_u16(value.len() as u16);
-        self.data.extend_from_slice(value);
+        self.data.put_slice(value);
 
         true
     }
@@ -72,4 +84,8 @@ impl BlockBuilder {
             offsets: self.offsets,
         }
     }
+}
+
+fn longest_common_prefix_len(a: &[u8], b: &[u8]) -> usize {
+    a.iter().zip(b).take_while(|(x, y)| x == y).count()
 }

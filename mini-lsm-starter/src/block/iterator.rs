@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use bytes::Buf;
+use bytes::{Buf, BufMut};
 
 use crate::key::{KeySlice, KeyVec};
 
@@ -68,7 +68,7 @@ impl BlockIterator {
         }
 
         self.idx = 0;
-        let entry_start = 0;
+        let entry_start = 2;
         let key_size = (&self.block.data[entry_start..entry_start + 2]).get_u16() as usize;
         let key_start = entry_start + 2;
         let key = &self.block.data[key_start..key_start + key_size];
@@ -91,12 +91,18 @@ impl BlockIterator {
 
         self.idx += 1;
         let entry_start = self.block.offsets[self.idx] as usize;
-        let key_size = (&self.block.data[entry_start..entry_start + 2]).get_u16() as usize;
-        let key_start = entry_start + 2;
-        let key = &self.block.data[key_start..key_start + key_size];
+        let prefix_len = (&self.block.data[entry_start..entry_start + 2]).get_u16() as usize;
+        let rest_key_size = (&self.block.data[entry_start + 2..entry_start + 4]).get_u16() as usize;
+        let rest_key_start = entry_start + 4;
+        let res_key = &self.block.data[rest_key_start..rest_key_start + rest_key_size];
+        let mut key = Vec::with_capacity(prefix_len + rest_key_size);
+        key.put_slice(&self.first_key.raw_ref()[..prefix_len]);
+        key.put_slice(res_key);
+
+        let value_size_begin = rest_key_start + rest_key_size;
         let value_size =
-            (&self.block.data[key_start + key_size..key_start + key_size + 2]).get_u16() as usize;
-        let value_start = key_start + key_size + 2;
+            (&self.block.data[value_size_begin..value_size_begin + 2]).get_u16() as usize;
+        let value_start = value_size_begin + 2;
         let value_end = value_start + value_size;
 
         self.key = KeyVec::from_vec(key.to_vec());
