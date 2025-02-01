@@ -15,6 +15,7 @@ pub use simple_leveled::{
 };
 pub use tiered::{TieredCompactionController, TieredCompactionOptions, TieredCompactionTask};
 
+use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::StorageIterator;
 use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
@@ -117,7 +118,7 @@ impl LsmStorageInner {
         };
         match task {
             CompactionTask::Leveled(_task) => unimplemented!(),
-            CompactionTask::Tiered(_task) => unimplemented!(),
+            CompactionTask::Tiered(task) => self.compact_tiers(&task.tiers, snapshot),
             CompactionTask::Simple(task) => self.compact_two_level(
                 &task.upper_level_sst_ids,
                 &task.lower_level_sst_ids,
@@ -128,6 +129,55 @@ impl LsmStorageInner {
                 l1_sstables,
             } => self.compact_two_level(l0_sstables, l1_sstables, snapshot),
         }
+    }
+
+    fn compact_tiers(
+        &self,
+        tiers: &Vec<(usize, Vec<usize>)>,
+        snapshot: Arc<LsmStorageState>,
+    ) -> Result<Vec<Arc<SsTable>>> {
+        let mut ssts_to_compact =
+            Vec::with_capacity(tiers.iter().fold(0, |acc, (_, v)| acc + v.len()));
+        for (_, tier) in tiers {
+            let mut ssts = Vec::with_capacity(tier.len());
+            for i in tier {
+                let table = snapshot.sstables[i].clone();
+                ssts.push(table);
+            }
+            ssts_to_compact.push(Box::new(SstConcatIterator::create_and_seek_to_first(ssts)?))
+        }
+
+        let mut new_ssts = Vec::new();
+        let mut iter = MergeIterator::create(ssts_to_compact);
+        let mut sst_builder = SsTableBuilder::new(self.options.block_size);
+        while iter.is_valid() {
+            if iter.value().is_empty() {
+                iter.next()?;
+                continue;
+            }
+            sst_builder.add(iter.key(), iter.value());
+            if sst_builder.estimated_size() >= self.options.target_sst_size {
+                let sst_id = self.next_sst_id();
+                let sst_file = sst_builder.build(
+                    sst_id,
+                    Some(self.block_cache.clone()),
+                    self.path_of_sst(sst_id),
+                )?;
+                new_ssts.push(Arc::new(sst_file));
+                sst_builder = SsTableBuilder::new(self.options.block_size);
+            }
+            iter.next()?;
+        }
+
+        let sst_id = self.next_sst_id();
+        let sst_file = sst_builder.build(
+            sst_id,
+            Some(self.block_cache.clone()),
+            self.path_of_sst(sst_id),
+        )?;
+        new_ssts.push(Arc::new(sst_file));
+
+        Ok(new_ssts)
     }
 
     fn compact_two_level(

@@ -495,7 +495,11 @@ impl LsmStorageInner {
             let mut state = self.state.write();
             let mut new_state = state.as_ref().clone();
             new_state.imm_memtables.pop();
-            new_state.l0_sstables.insert(0, sst_id);
+            if self.compaction_controller.flush_to_l0() {
+                new_state.l0_sstables.insert(0, sst_id);
+            } else {
+                new_state.levels.insert(0, (sst_id, vec![sst_id]));
+            }
             new_state.sstables.insert(sst_id, Arc::new(sst_file));
             *state = Arc::new(new_state);
         }
