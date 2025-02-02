@@ -19,6 +19,7 @@ use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::StorageIterator;
 use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
+use crate::manifest::ManifestRecord;
 use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -273,7 +274,7 @@ impl LsmStorageInner {
             let new_ssts = self.compact(&task)?;
             let output: Vec<usize> = new_ssts.iter().map(|x| x.sst_id()).collect::<Vec<_>>();
             let del_ssts = {
-                let _state_lock = self.state_lock.lock();
+                let state_lock = self.state_lock.lock();
                 let mut state = self.state.write();
                 let mut new_state = state.as_ref().clone();
                 for sst in &new_ssts {
@@ -283,6 +284,13 @@ impl LsmStorageInner {
                     .compaction_controller
                     .apply_compaction_result(&new_state, &task, &output, true);
                 *state = Arc::new(new_state);
+
+                if let Some(manifest) = &self.manifest {
+                    let record = ManifestRecord::Compaction(task, output);
+                    manifest.add_record(&state_lock, record)?;
+                }
+                self.sync_dir()?;
+
                 del_ssts
             };
 

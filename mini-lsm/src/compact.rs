@@ -315,7 +315,7 @@ impl LsmStorageInner {
             let state = self.state.read();
             state.clone()
         };
-        let task = self
+        let task: Option<CompactionTask> = self
             .compaction_controller
             .generate_compaction_task(&snapshot);
         let Some(task) = task else {

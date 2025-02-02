@@ -1,6 +1,7 @@
 #![allow(dead_code)] // REMOVE THIS LINE after fully implementing this functionality
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
@@ -21,10 +22,10 @@ use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
 use crate::key::KeySlice;
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, ManifestRecord};
 use crate::mem_table::{map_bound, MemTable};
 use crate::mvcc::LsmMvccInner;
-use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
+use crate::table::{FileObject, SsTable, SsTableBuilder, SsTableIterator};
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
@@ -190,7 +191,40 @@ impl Drop for MiniLsm {
 
 impl MiniLsm {
     pub fn close(&self) -> Result<()> {
-        unimplemented!()
+        self.inner.sync_dir()?;
+        self.compaction_notifier.send(()).ok();
+        self.flush_notifier.send(()).ok();
+
+        let mut compaction_thread = self.compaction_thread.lock();
+        if let Some(compaction_thread) = compaction_thread.take() {
+            compaction_thread
+                .join()
+                .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+        }
+        let mut flush_thread = self.flush_thread.lock();
+        if let Some(flush_thread) = flush_thread.take() {
+            flush_thread
+                .join()
+                .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+        }
+
+        {
+            let lock = self.inner.state_lock.lock();
+            if !self.inner.state.read().memtable.is_empty() {
+                self.inner.force_freeze_memtable(&lock)?;
+            }
+        }
+        if !self.inner.options.enable_wal {
+            while {
+                let state = self.inner.state.read();
+                !state.imm_memtables.is_empty()
+            } {
+                self.inner.force_flush_next_imm_memtable()?;
+            }
+        }
+
+        self.inner.sync_dir()?;
+        Ok(())
     }
 
     /// Start the storage engine by either loading an existing directory or creating a new one if the directory does
@@ -273,7 +307,8 @@ impl LsmStorageInner {
     /// not exist.
     pub(crate) fn open(path: impl AsRef<Path>, options: LsmStorageOptions) -> Result<Self> {
         let path = path.as_ref();
-        let state = LsmStorageState::create(&options);
+        let mut state = LsmStorageState::create(&options);
+        let block_cache = Arc::new(BlockCache::new(1024));
 
         let compaction_controller = match &options.compaction_options {
             CompactionOptions::Leveled(options) => {
@@ -288,14 +323,49 @@ impl LsmStorageInner {
             CompactionOptions::NoCompaction => CompactionController::NoCompaction,
         };
 
+        let manifest_path = path.join("MANIFEST");
+        let mut max_id = 0;
+        let manifest = if let Ok((manifest, records)) = Manifest::recover(manifest_path.clone()) {
+            for record in records {
+                match record {
+                    ManifestRecord::Flush(id) => {
+                        state.levels.insert(0, (id, vec![id]));
+                    }
+                    ManifestRecord::NewMemtable(_) => {}
+                    ManifestRecord::Compaction(compaction_task, items) => {
+                        let (new_state, _) = compaction_controller.apply_compaction_result(
+                            &state,
+                            &compaction_task,
+                            &items,
+                            true,
+                        );
+                        state = new_state;
+                    }
+                }
+            }
+            for (_, ids) in &state.levels {
+                for id in ids {
+                    max_id = max_id.max(*id);
+                    let file_path = Self::path_of_sst_static(path, *id);
+                    let file = FileObject::open(&file_path)?;
+                    let table = SsTable::open(*id, Some(block_cache.clone()), file)?;
+                    state.sstables.insert(*id, Arc::new(table));
+                }
+            }
+
+            manifest
+        } else {
+            Manifest::create(manifest_path)?
+        };
+
         let storage = Self {
             state: Arc::new(RwLock::new(Arc::new(state))),
             state_lock: Mutex::new(()),
             path: path.to_path_buf(),
-            block_cache: Arc::new(BlockCache::new(1024)),
-            next_sst_id: AtomicUsize::new(1),
+            block_cache,
+            next_sst_id: AtomicUsize::new(max_id + 1),
             compaction_controller,
-            manifest: None,
+            manifest: Some(manifest),
             options: options.into(),
             mvcc: None,
             compaction_filters: Arc::new(Mutex::new(Vec::new())),
@@ -453,7 +523,7 @@ impl LsmStorageInner {
     }
 
     pub(super) fn sync_dir(&self) -> Result<()> {
-        unimplemented!()
+        Ok(File::open(self.path.clone())?.sync_all()?)
     }
 
     /// Force freeze the current memtable to an immutable memtable
@@ -472,6 +542,7 @@ impl LsmStorageInner {
 
     /// Force flush the earliest-created immutable memtable to disk
     pub fn force_flush_next_imm_memtable(&self) -> Result<()> {
+        let lock = self.state_lock.lock();
         let snapshot = {
             let guard = self.state.read();
             Arc::clone(&guard)
@@ -480,7 +551,6 @@ impl LsmStorageInner {
             return Ok(());
         }
 
-        let _lock = self.state_lock.lock();
         let mem_table = snapshot.imm_memtables.last().unwrap();
         let mut sst_builder = SsTableBuilder::new(self.options.block_size);
         mem_table.flush(&mut sst_builder)?;
@@ -503,6 +573,12 @@ impl LsmStorageInner {
             new_state.sstables.insert(sst_id, Arc::new(sst_file));
             *state = Arc::new(new_state);
         }
+
+        if let Some(manifest) = &self.manifest {
+            let record = ManifestRecord::Flush(sst_id);
+            manifest.add_record(&lock, record)?;
+        }
+        self.sync_dir()?;
 
         Ok(())
     }
