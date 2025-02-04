@@ -1,6 +1,6 @@
 #![allow(dead_code)] // REMOVE THIS LINE after fully implementing this functionality
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
@@ -214,13 +214,18 @@ impl MiniLsm {
                 self.inner.force_freeze_memtable(&lock)?;
             }
         }
-        if !self.inner.options.enable_wal {
-            while {
-                let state = self.inner.state.read();
-                !state.imm_memtables.is_empty()
-            } {
-                self.inner.force_flush_next_imm_memtable()?;
-            }
+
+        if self.inner.options.enable_wal {
+            self.inner.sync()?;
+            self.inner.sync_dir()?;
+            return Ok(());
+        }
+
+        while {
+            let state = self.inner.state.read();
+            !state.imm_memtables.is_empty()
+        } {
+            self.inner.force_flush_next_imm_memtable()?;
         }
 
         self.inner.sync_dir()?;
@@ -325,13 +330,19 @@ impl LsmStorageInner {
 
         let manifest_path = path.join("MANIFEST");
         let mut max_id = 0;
+        let mut memtables = BTreeSet::new();
         let manifest = if let Ok((manifest, records)) = Manifest::recover(manifest_path.clone()) {
             for record in records {
                 match record {
                     ManifestRecord::Flush(id) => {
+                        max_id = max_id.max(id);
+                        memtables.remove(&id);
                         state.levels.insert(0, (id, vec![id]));
                     }
-                    ManifestRecord::NewMemtable(_) => {}
+                    ManifestRecord::NewMemtable(id) => {
+                        max_id = max_id.max(id);
+                        memtables.insert(id);
+                    }
                     ManifestRecord::Compaction(compaction_task, items) => {
                         let (new_state, _) = compaction_controller.apply_compaction_result(
                             &state,
@@ -345,7 +356,6 @@ impl LsmStorageInner {
             }
             for (_, ids) in &state.levels {
                 for id in ids {
-                    max_id = max_id.max(*id);
                     let file_path = Self::path_of_sst_static(path, *id);
                     let file = FileObject::open(&file_path)?;
                     let table = SsTable::open(*id, Some(block_cache.clone()), file)?;
@@ -357,6 +367,13 @@ impl LsmStorageInner {
         } else {
             Manifest::create(manifest_path)?
         };
+
+        if options.enable_wal {
+            for id in memtables {
+                let memtable = MemTable::recover_from_wal(id, path)?;
+                state.imm_memtables.insert(0, Arc::new(memtable));
+            }
+        }
 
         let storage = Self {
             state: Arc::new(RwLock::new(Arc::new(state))),
@@ -370,12 +387,13 @@ impl LsmStorageInner {
             mvcc: None,
             compaction_filters: Arc::new(Mutex::new(Vec::new())),
         };
+        storage.sync_dir()?;
 
         Ok(storage)
     }
 
     pub fn sync(&self) -> Result<()> {
-        unimplemented!()
+        self.state.read().memtable.sync_wal()
     }
 
     pub fn add_compaction_filter(&self, compaction_filter: CompactionFilter) {
@@ -527,8 +545,16 @@ impl LsmStorageInner {
     }
 
     /// Force freeze the current memtable to an immutable memtable
-    pub fn force_freeze_memtable(&self, _state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
-        let memtable = MemTable::create(self.next_sst_id());
+    pub fn force_freeze_memtable(&self, state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
+        let id = self.next_sst_id();
+        let memtable = if self.options.enable_wal {
+            MemTable::create_with_wal(id, self.path.clone())?
+        } else {
+            MemTable::create(id)
+        };
+        if let Some(manifest) = &self.manifest {
+            manifest.add_record(state_lock_observer, ManifestRecord::NewMemtable(id))?;
+        }
         {
             let mut state = self.state.write();
             let mut new_state = state.as_ref().clone();
