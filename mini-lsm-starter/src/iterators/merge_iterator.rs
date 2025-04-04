@@ -12,11 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use std::cmp::{self};
 use std::collections::BinaryHeap;
+use std::collections::binary_heap::PeekMut;
 
 use anyhow::Result;
 
@@ -59,7 +57,22 @@ pub struct MergeIterator<I: StorageIterator> {
 
 impl<I: StorageIterator> MergeIterator<I> {
     pub fn create(iters: Vec<Box<I>>) -> Self {
-        unimplemented!()
+        let mut merge_iter = MergeIterator {
+            iters: BinaryHeap::new(),
+            current: None,
+        };
+
+        for (i, iter) in iters.into_iter().enumerate() {
+            if iter.is_valid() {
+                merge_iter.iters.push(HeapWrapper(i, iter));
+            }
+        }
+
+        if let Some(iter) = merge_iter.iters.pop() {
+            merge_iter.current = Some(iter);
+        }
+
+        merge_iter
     }
 }
 
@@ -69,18 +82,58 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
     type KeyType<'a> = KeySlice<'a>;
 
     fn key(&self) -> KeySlice {
-        unimplemented!()
+        if let Some(iter) = &self.current {
+            return iter.1.key();
+        }
+        KeySlice::from_slice(&[])
     }
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        if let Some(iter) = &self.current {
+            return iter.1.value();
+        }
+        &[]
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        self.current
+            .as_ref()
+            .map(|iter| iter.1.is_valid())
+            .unwrap_or(false)
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        let current = self.current.as_mut().unwrap();
+        while let Some(mut iter) = self.iters.peek_mut() {
+            if current.1.key() == iter.1.key() {
+                if let e @ Err(_) = iter.1.next() {
+                    PeekMut::pop(iter);
+                    return e;
+                }
+
+                if !iter.1.is_valid() {
+                    PeekMut::pop(iter);
+                }
+            } else {
+                break;
+            }
+        }
+
+        current.1.next()?;
+
+        if !current.1.is_valid() {
+            if let Some(iter) = self.iters.pop() {
+                *current = iter;
+            }
+            return Ok(());
+        }
+
+        if let Some(mut iter) = self.iters.peek_mut() {
+            if *current < *iter {
+                std::mem::swap(current, &mut iter);
+            }
+        }
+
+        Ok(())
     }
 }
